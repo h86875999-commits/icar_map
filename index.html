@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ICAR 门店分布地图</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        #map { height: 100%; width: 100%; background-color: #e5e3df; }
+
+        /* 侧边栏 */
+        .sidebar {
+            position: absolute; top: 20px; left: 20px; width: 280px;
+            background: white; padding: 15px 20px; border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 10;
+            display: flex; flex-direction: column; max-height: 85vh; overflow-y: auto;
+        }
+
+        .filter-section { margin-bottom: 12px; display: flex; flex-direction: column; }
+        .filter-section h4 { margin: 0 0 8px 0; font-size: 14px; color: #333; }
+
+        /* 搜索框 */
+        .search-box {
+            width: 100%; padding: 6px 10px; margin-bottom: 8px;
+            border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box;
+            font-size: 13px; outline: none;
+        }
+        .search-box:focus { border-color: #4285f4; }
+
+        /* 多选列表 */
+        .checkbox-list {
+            overflow-y: auto; max-height: 110px; border: 1px solid #eee; border-radius: 6px; padding: 8px;
+        }
+        .checkbox-item { display: flex; align-items: center; margin-bottom: 6px; font-size: 13px; cursor: pointer; }
+        .checkbox-item input { margin-right: 8px; cursor: pointer; }
+
+        /* 结果统计 */
+        .result-count { margin-top: auto; font-size: 15px; border-top: 1px solid #eee; padding-top: 12px; font-weight: bold; }
+        .result-count span { color: black; font-size: 16px; }
+
+        /* 弹窗样式 */
+        .info-card { width: 260px; padding: 15px; font-family: sans-serif; }
+        .info-card h3 { margin: 0 0 8px 0; font-size: 16px; color: #000; }
+        .info-card p { margin: 0 0 8px 0; font-size: 13px; color: #555; line-height: 1.4; }
+        .info-tag { display: inline-block; font-size: 12px; color: #333; background: #f0f0f0; padding: 4px 8px; border-radius: 4px; margin-right: 5px; }
+    </style>
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB5wHlaWUxsoxDrf0FoSexVIMEYCVAr0VE"></script>
+</head>
+<body>
+
+    <div class="sidebar">
+        <div class="filter-section">
+            <h4>筛选国家 (Country)</h4>
+            <input type="text" id="search-country" class="search-box" placeholder="搜索国家...">
+            <div class="checkbox-list" id="list-country"></div>
+        </div>
+
+        <div class="filter-section">
+            <h4>筛选品牌 (Brand)</h4>
+            <div class="checkbox-list" id="list-brand"></div>
+        </div>
+
+        <div class="filter-section">
+            <h4>业务类型 (Facility)</h4>
+            <div class="checkbox-list" id="list-facility"></div>
+        </div>
+
+        <div class="result-count">
+            找到门店: <span id="count-display">0</span> 家
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        // 1. 定义全局变量
+        let locationsData = []; 
+        let map, currentMarkers = [], activeInfoWindow = null;
+        let selectedCountries = new Set(); 
+        let selectedBrands = new Set(); 
+        let selectedFacilities = new Set(); 
+
+        // ⚠️ 你的图标配置（从 Python 代码里提取）
+        const brandIconsConfig = {
+            "BS": "https://i.imgur.com/jubLCDL.png",
+            "BA": "https://i.imgur.com/fobF5c0.png",
+            "BB": "https://i.imgur.com/ZXKWHQg.png",
+            "DS": "https://i.imgur.com/hbCoTL3.png",
+            "DA": "https://i.imgur.com/rBAhO4A.png",
+            "DB": "https://i.imgur.com/ftW1KGp.png",
+            "Default": "https://maps.google.com/mapfiles/ms/icons/grey-dot.png"
+        };
+
+        let googleIcons = {};
+        for (const [key, url] of Object.entries(brandIconsConfig)) {
+            googleIcons[key] = {
+                url: url,
+                scaledSize: new google.maps.Size(36, 36),
+                anchor: new google.maps.Point(18, 36)
+            };
+        }
+
+        // ⚠️ 代码翻译函数（替代 Python 里的 translate_brand_code）
+        function parseBrandCode(code) {
+            code = String(code).trim().toUpperCase();
+            let brand = "Unknown", facility = "Unknown";
+            if (code.length >= 2) {
+                if (code[0] === 'B') brand = 'BYD';
+                else if (code[0] === 'D') brand = 'Denza';
+
+                if (code[1] === 'A') facility = 'Aftersales';
+                else if (code[1] === 'S') facility = 'Showroom';
+                else if (code[1] === 'B') facility = '4S';
+            }
+            return { brand, facility };
+        }
+
+        // 2. 去 Google 拉取数据
+        async function loadStoreData() {
+            // ⚠️⚠️⚠️ 必改项：这里必须换成你【ICAR门店】对应的 Apps Script Web App 网址 ⚠️⚠️⚠️
+            const API_URL = 'https://script.google.com/macros/s/AKfycbw-OO_dL4qDq6NkMyUKI708ni-JRCINsXltVOu35iXrEYdxATsYW2aBnf7Mu8cOhHbVww/exec';
+            
+            try {
+                const response = await fetch(API_URL + '?t=' + new Date().getTime()); // 加时间戳防缓存
+                const rawData = await response.json();
+                
+                // 数据映射与解析
+                locationsData = rawData.map(row => {
+                    const rawBrandCode = String(row.brand).trim().toUpperCase();
+                    const { brand, facility } = parseBrandCode(rawBrandCode);
+                    
+                    let icon_key = rawBrandCode;
+                    if (!brandIconsConfig[icon_key]) icon_key = "Default";
+
+                    return {
+                        country: String(row.country).trim(),
+                        name: String(row.Store).trim(),
+                        address: String(row.address).trim(),
+                        lat: parseFloat(row.lat),
+                        lng: parseFloat(row.lng),
+                        brand: brand,          // 用于左侧筛选
+                        facility: facility,    // 用于左侧筛选
+                        businesstype: String(row.businesstype).trim(), // 弹窗显示
+                        icon_key: icon_key
+                    };
+                });
+                
+                console.log("数据拉取成功，共", locationsData.length, "条");
+                initMap(); 
+                
+            } catch (error) {
+                console.error('加载门店数据失败:', error);
+                alert('数据加载失败，请检查控制台报错');
+            }
+        }
+
+        // 3. 初始化地图
+        function initMap() {
+            if (locationsData.length === 0) return;
+
+            map = new google.maps.Map(document.getElementById("map"), {
+                center: { lat: locationsData[0].lat || 1.130, lng: locationsData[0].lng || 104.053 },
+                zoom: 5,
+                disableDefaultUI: true,
+                zoomControl: true,
+            });
+
+            const countries = [...new Set(locationsData.map(item => item.country))].sort();
+            renderCheckboxes('list-country', 'country', countries, selectedCountries);
+            document.getElementById('search-country').addEventListener('input', (e) => filterList('list-country', e.target.value));
+
+            const brands = [...new Set(locationsData.map(item => item.brand))].sort();
+            renderCheckboxes('list-brand', 'brand', brands, selectedBrands);
+
+            const facilities = [...new Set(locationsData.map(item => item.facility))].sort();
+            renderCheckboxes('list-facility', 'facility', facilities, selectedFacilities);
+
+            renderMarkers();
+        }
+
+        // 4. 渲染复选框和筛选逻辑（完全照搬你的 Python 逻辑）
+        function renderCheckboxes(containerId, type, items, selectedSet) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+
+            const allLabel = document.createElement('label');
+            allLabel.className = 'checkbox-item';
+            allLabel.innerHTML = `<input type="checkbox" id="select-all-${type}" checked> <strong>全选</strong>`;
+            container.appendChild(allLabel);
+
+            items.forEach(item => {
+                selectedSet.add(item); 
+                const label = document.createElement('label');
+                label.className = 'checkbox-item';
+                label.innerHTML = `<input type="checkbox" class="cb-${type}" value="${item}" checked> ${item}`;
+
+                label.querySelector('input').addEventListener('change', (e) => {
+                    if (e.target.checked) selectedSet.add(item);
+                    else selectedSet.delete(item);
+                    updateSelectAllState(type);
+                    renderMarkers();
+                });
+                container.appendChild(label);
+            });
+
+            document.getElementById(`select-all-${type}`).addEventListener('change', (e) => {
+                const isChecked = e.target.checked;
+                document.querySelectorAll(`.cb-${type}`).forEach(cb => {
+                    if(cb.parentElement.style.display !== 'none') {
+                        cb.checked = isChecked;
+                        if(isChecked) selectedSet.add(cb.value);
+                        else selectedSet.delete(cb.value);
+                    }
+                });
+                renderMarkers();
+            });
+        }
+
+        function updateSelectAllState(type) {
+            const classSelector = `.cb-${type}`;
+            const allId = `select-all-${type}`;
+            const allCbs = document.querySelectorAll(classSelector);
+            const checkedCbs = document.querySelectorAll(classSelector + ':checked');
+            const selectAllBox = document.getElementById(allId);
+
+            if (allCbs.length === checkedCbs.length) {
+                selectAllBox.checked = true; selectAllBox.indeterminate = false;
+            } else if (checkedCbs.length === 0) {
+                selectAllBox.checked = false; selectAllBox.indeterminate = false;
+            } else {
+                selectAllBox.checked = false; selectAllBox.indeterminate = true;
+            }
+        }
+
+        function filterList(containerId, keyword) {
+            const labels = document.querySelectorAll(`#${containerId} .checkbox-item`);
+            const kw = keyword.toLowerCase();
+            labels.forEach(label => {
+                if (label.querySelector('input[id^="select-all"]')) return;
+                const text = label.textContent.toLowerCase();
+                label.style.display = text.includes(kw) ? 'flex' : 'none';
+            });
+        }
+
+        function renderMarkers() {
+            currentMarkers.forEach(marker => marker.setMap(null));
+            currentMarkers = [];
+            if (activeInfoWindow) activeInfoWindow.close();
+
+            const filteredData = locationsData.filter(item => 
+                selectedCountries.has(item.country) && 
+                selectedBrands.has(item.brand) && 
+                selectedFacilities.has(item.facility)
+            );
+
+            // 去重统计
+            const uniqueStores = new Set();
+            filteredData.forEach(item => {
+                uniqueStores.add(`${item.name}_${item.lat}_${item.lng}`);
+            });
+            document.getElementById('count-display').textContent = uniqueStores.size;
+
+            // 坐标防重叠
+            const coordMap = new Map();
+
+            filteredData.forEach((data, index) => {
+                const iconConfig = googleIcons[data.icon_key] || googleIcons["Default"];
+
+                const coordKey = `${data.lat.toFixed(5)},${data.lng.toFixed(5)}`;
+                let finalLat = data.lat;
+                let finalLng = data.lng;
+
+                if (coordMap.has(coordKey)) {
+                    const count = coordMap.get(coordKey);
+                    const angle = count * (Math.PI / 4); 
+                    const radius = 0.00015; 
+                    finalLat += Math.sin(angle) * radius;
+                    finalLng += Math.cos(angle) * radius;
+                    coordMap.set(coordKey, count + 1);
+                } else {
+                    coordMap.set(coordKey, 1);
+                }
+
+                const marker = new google.maps.Marker({
+                    map: map,
+                    position: { lat: finalLat, lng: finalLng },
+                    title: data.name,
+                    icon: iconConfig,
+                    zIndex: index + 1
+                });
+
+                marker.addListener("click", () => {
+                    if (activeInfoWindow) activeInfoWindow.close();
+                    marker.setZIndex(google.maps.Marker.MAX_ZINDEX + 1); 
+                    map.panTo(marker.getPosition());
+                    map.setZoom(15);
+
+                    const contentString = `
+                        <div class="info-card">
+                            <h3>${data.name}</h3>
+                            <p><strong>Address:</strong><br>${data.address}</p>
+                            <div style="margin-top: 10px;">
+                                <span class="info-tag">${data.businesstype}</span>
+                            </div>
+                        </div>
+                    `;
+
+                    activeInfoWindow = new google.maps.InfoWindow({ content: contentString });
+                    activeInfoWindow.open(map, marker);
+                });
+
+                currentMarkers.push(marker);
+            });
+        }
+
+        // 5. 页面加载时启动
+        window.onload = loadStoreData;
+    </script>
+</body>
+</html>
